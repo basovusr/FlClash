@@ -1,0 +1,125 @@
+name: freevpn-apk
+
+# 只构建 Android APK 并发布到 Release（手机可直接下载）。
+# 上游的 build job 条件严格等于 chen08209/FlClash，在 fork 里必然跳过，
+# 所以这里单独实现一份。
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/freevpn-apk.yml'
+      - 'lib/**'
+      - 'android/**'
+      - 'core/**'
+      - 'pubspec.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27.1'
+  NDK_VERSION: r28c
+
+jobs:
+  apk:
+    name: Build signed APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          link-to-sdk: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # android/app/build.gradle.kts 的逻辑:
+      #   有 release 签名 -> 包名 com.follow.clash
+      #   无 release 签名 -> 回退 debug 签名并把包名变成 com.follow.clash.dev
+      # 后者会与已安装的官方 FlClash 共存而不是覆盖，所以生成临时签名密钥。
+      # keystore.jks 与 local.properties 都在 android/.gitignore 中，不会进仓库。
+      - name: Generate signing key
+        working-directory: android/app
+        run: |
+          keytool -genkeypair -v \
+            -keystore keystore.jks -storetype JKS \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias freevpn \
+            -storepass FreeVpn_2026_Kx9 \
+            -keypass FreeVpn_2026_Kx9 \
+            -dname "CN=freeVPN, OU=Personal, O=freeVPN, L=Unknown, S=Unknown, C=CN"
+          ls -la keystore.jks
+
+      - name: Configure signing
+        run: |
+          printf 'storePassword=FreeVpn_2026_Kx9\nkeyAlias=freevpn\nkeyPassword=FreeVpn_2026_Kx9\n' > android/local.properties
+          echo "--- android/local.properties ---"
+          cat android/local.properties
+
+      - name: Build release APK
+        env:
+          APP_ENV: stable
+        run: flutter build apk --release --split-per-abi
+
+      - name: Inspect package name
+        run: |
+          APK=$(ls build/app/outputs/flutter-apk/*arm64-v8a*.apk 2>/dev/null | head -1)
+          echo "APK: $APK"
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -1)
+          if [ -n "$AAPT" ] && [ -n "$APK" ]; then
+            "$AAPT" dump badging "$APK" 2>/dev/null | head -1 || true
+          fi
+
+      - name: List APKs
+        run: find build/app/outputs -name '*.apk' -exec ls -lh {} \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freevpn-apk
+          path: build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: freevpn-apk-${{ github.run_number }}
+          name: freeVPN APK #${{ github.run_number }}
+          body: |
+            自动构建的 freeVPN Android APK。
+
+            下载 **arm64-v8a** 版本（绝大多数现代手机适用）。
+            不确定架构就先试 arm64-v8a，装不上再试 armeabi-v7a。
+
+            内置 mihomo 内核，与电脑端同源。
+          files: build/app/outputs/flutter-apk/*.apk
+          draft: false
+          prerelease: false
