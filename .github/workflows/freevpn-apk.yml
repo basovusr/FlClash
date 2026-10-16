@@ -4,14 +4,14 @@ name: freevpn-apk
 # 上游的 build job 条件严格等于 chen08209/FlClash，在 fork 里必然跳过，
 # 所以这里单独实现一份。
 #
-# 关于 NDK 版本（第一次构建失败的根因，值得记下）:
-#   android/gradle/libs.versions.toml 里声明的是 ndkVersion = 28.2.13676358。
-#   plugins/rust_api/hook/build.dart 需要从 Flutter 传入的编译器路径向上找
-#   lib/lib64 下的 libclang.*，用于 rquickjs 的 bindgen。
-#   第一次失败是因为只装了上游 workflow 用的 r28c，与 Granle 要的 28.2.13676358
-#   不是同一个东西，Flutter 于是回退到它自己的默认 27.3.13750724 —— 也没装，
-#   导致 "No libclang ... cannot run bindgen for rquickjs"。
-#   这里把两个版本都装上，无论 Flutter 最终传哪个都能找到 libclang。
+# NDK 版本踩坑记录（两次失败）:
+#   1) 一开始照抄上游的 r28c —— 那是给单元测试用的，真正构建时 Flutter
+#      传入的 NDK 路径不是它，rust_api 的 bindgen 找不到 libclang。
+#   2) 改用 android/gradle/libs.versions.toml 里的 28.2.13676358 —— 那是
+#      NDK 的内部 build 号，而 nttld/setup-ndk 是从 Google 仓库按
+#      release 号(r27c/r28b)下载的，于是 404。
+#   结论: setup-ndk 必须用 release 号。这里把 r27 与 r28 两个系列都装上，
+#   无论 Flutter 最终采用哪个版本都能找到 libclang。
 on:
   push:
     branches: [ main ]
@@ -30,8 +30,9 @@ permissions:
 env:
   FLUTTER_VERSION: '3.47.6'
   GO_VERSION: '1.27.1'
-  NDK_CATALOG: 28.2.13676358
-  NDK_FLUTTER_DEFAULT: 27.3.13750724
+  # 注意: 这里必须是 release 号（r27c/r28b），不是 libs.versions.toml 里的 build 号
+  NDK_R27: r27c
+  NDK_R28: r28b
 
 jobs:
   apk:
@@ -62,40 +63,43 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      # 装两个 NDK：Gradle 声明的那个 + Flutter 的默认那个
-      - name: Setup NDK (Gradle declared)
+      - name: Setup NDK r27
         uses: nttld/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: ${{ env.NDK_CATALOG }}
-          link-to-sdk: true
-
-      - name: Setup NDK (Flutter default fallback)
-        uses: nttld/setup-ndk@v1
-        id: ndk2
+        id: ndk27
         continue-on-error: true
         with:
-          ndk-version: ${{ env.NDK_FLUTTER_DEFAULT }}
+          ndk-version: ${{ env.NDK_R27 }}
+          link-to-sdk: true
+
+      - name: Setup NDK r28
+        uses: nttld/setup-ndk@v1
+        id: ndk28
+        continue-on-error: true
+        with:
+          ndk-version: ${{ env.NDK_R28 }}
           link-to-sdk: true
 
       - name: Inspect installed NDKs and libclang
         run: |
-          echo "=== installed NDK versions ==="
+          echo "=== ANDROID_HOME=$ANDROID_HOME ==="
+          echo "--- installed NDK versions ---"
           ls -1 "$ANDROID_HOME/ndk" 2>/dev/null || echo "(no ndk dir)"
           echo
           for v in "$ANDROID_HOME"/ndk/*; do
-            echo "--- $v ---"
-            ls -d "$v"/toolchains/llvm/prebuilt/linux-x86_64/lib* 2>/dev/null || echo "  no lib/lib64"
-            find "$v"/toolchains/llvm/prebuilt/linux-x86_64 -maxdepth 2 \
-              -name 'libclang*' 2>/dev/null | head -3
+            [ -d "$v" ] || continue
+            echo "=== $v ==="
+            cat "$v/source.properties" 2>/dev/null | head -3 || true
+            LLVM="$v/toolchains/llvm/prebuilt/linux-x86_64"
+            ls -d "$LLVM"/lib "$LLVM"/lib64 2>/dev/null || echo "  no lib/lib64"
+            find "$LLVM" -maxdepth 2 -name 'libclang*' 2>/dev/null | head -3
           done
 
       - name: Install dependencies
         run: flutter pub get
 
-      # android/app/build.gradle.kts 的逻辑:
+      # android/app/build.gradle.kts:
       #   有 release 签名 -> 包名 com.follow.clash
-      #   无 release 签名 -> 回退 debug 签名并把包名变成 com.follow.clash.dev
+      #   无 release 签名 -> 回退 debug 签名并把包名改成 com.follow.clash.dev
       # 后者会与已安装的官方 FlClash 共存而不是覆盖，所以生成临时签名密钥。
       # keystore.jks 与 local.properties 都在 android/.gitignore 中，不会进仓库。
       - name: Generate signing key
@@ -118,19 +122,7 @@ jobs:
       - name: Build release APK
         env:
           APP_ENV: stable
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-        run: |
-          # 兜底：把已安装 NDK 的 lib 目录加进 LIBCLANG_PATH 候选
-          for v in "$ANDROID_HOME"/ndk/*; do
-            for d in "$v/toolchains/llvm/prebuilt/linux-x86_64/lib" \
-                     "$v/toolchains/llvm/prebuilt/linux-x86_64/lib64"; do
-              if [ -d "$d" ] && ls "$d"/libclang.* >/dev/null 2>&1; then
-                echo "Found libclang in $d"
-              fi
-            done
-          done
-          flutter build apk --release --split-per-abi
+        run: flutter build apk --release --split-per-abi
 
       - name: Inspect package name
         run: |
