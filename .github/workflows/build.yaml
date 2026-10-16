@@ -18,6 +18,12 @@ env:
   GO_VERSION: '1.27.1'
   NDK_VERSION: r28c
 
+# 本仓库是 chen08209/FlClash 的 fork，仅用于构建自用 APK。
+# 上游这套 workflow 会跑桌面端矩阵与大量 lint/测试，在 fork 里没有意义，
+# 且每次 push 都会白烧 CI 时间，所以整体跳过。
+# 若将来需要向上游提交 PR，删除下面这一行即可。
+if: github.repository == 'chen08209/FlClash'
+
 jobs:
   dart:
     name: Dart
