@@ -3,23 +3,26 @@ name: freevpn-apk
 # 只构建 Android APK 并发布到 Release（手机可直接下载）。
 # 上游的 build job 条件严格等于 chen08209/FlClash，在 fork 里必然跳过。
 #
-# === NDK 踩坑记录（三次失败，值得完整保留）===
+# === NDK 踩坑记录（完整保留，供以后排查）===
 # 现象: rust_api 的 build hook 报
 #   Bad state: No libclang under .../ndk/27.3.13750724/toolchains/llvm/prebuilt/
 #   linux-x86_64 (lib or lib64); the NDK Flutter passed cannot run bindgen
 #
-# 排查结论（逐条实测）:
-#   1) NDK 27.x 系列天生不带 libclang（只有 lib/ 没有 libclang.so），
-#      而 28.1 / 29.0 / 30.0 都带。所以问题不是"没装 NDK"，
-#      而是 Flutter 恰好选了一个不会带 libclang 的版本。
+# 实测结论:
+#   1) NDK 27.x 天生不带 libclang（只有 lib/ 没有 libclang.so），
+#      28.1 / 29.0 / 30.0 都带。所以不是"没装 NDK"，而是 Flutter
+#      恰好选了一个不带 libclang 的版本。
 #   2) nttld/setup-ndk 按 Google 仓库的 release 号(r27c/r28b)下载，
-#      而 android/gradle/libs.versions.toml 里的 28.2.13676358 是内部
-#      build 号，直接拿它去下载会 404。
-#   3) Flutter 的 NDK 解析顺序里 ANDROID_NDK_HOME 环境变量优先级最高
+#      而 libs.versions.toml 里的 28.2.13676358 是内部 build 号，直接
+#      拿去下载会 404。
+#   3) Flutter 解析 NDK 时 ANDROID_NDK_HOME 优先级最高
 #      (getNdkDirectoriesInResolutionOrder)，其后才按版本号从新到旧。
+#   4) GitHub Actions 不允许在 env 里引用 env 上下文
+#      （env: FOO: ${{ env.BAR }} 会导致整个 workflow 解析失败，
+#        症状是运行记录里显示文件路径而不是 workflow 名称）。
 #
-# 因此这里显式把 ANDROID_NDK_HOME 指向 28.1.13356709 —— runner 上已预装
-# 且确认含 libclang.so，绕开所有版本推断的不确定性。
+# 因此这里用【字面量】路径指定 ANDROID_NDK_HOME，指向 runner 已预装
+# 且确认含 libclang.so 的 28.1.13356709。
 on:
   push:
     branches: [ main ]
@@ -38,7 +41,6 @@ permissions:
 env:
   FLUTTER_VERSION: '3.47.6'
   GO_VERSION: '1.27.1'
-  # runner 预装且确认含 libclang 的 NDK，直接指定，避免版本推断踩坑
   NDK_VERSION: '28.1.13356709'
 
 jobs:
@@ -46,8 +48,9 @@ jobs:
     name: Build signed APK
     runs-on: ubuntu-latest
     env:
-      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
-      ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
+      # 必须写字面量：env 里不能再引用 env（会让 workflow 解析失败）
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/28.1.13356709
+      ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/28.1.13356709
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,20 +76,18 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
-      - name: Ensure required NDK is present
+      - name: Check target NDK
         run: |
           NDK="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
+          echo "target NDK: $NDK"
+          cat "$NDK/source.properties" 2>/dev/null | head -3 || echo "MISSING"
+          ls "$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib" 2>/dev/null | grep -i libclang || echo "NO libclang"
           if [ ! -f "$NDK/source.properties" ]; then
-            echo "NDK ${{ env.NDK_VERSION }} not present, installing via sdkmanager..."
+            echo "installing via sdkmanager..."
             yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.NDK_VERSION }}" || true
           fi
-          echo "--- using NDK: $NDK ---"
-          cat "$NDK/source.properties" 2>/dev/null | head -3 || echo "MISSING $NDK"
-          ls "$NDK/toolchains/llvm/prebuilt/linux-x86_64/lib" 2>/dev/null | grep -i libclang || echo "NO libclang"
-
-      - name: Show flutter ndk expectation
-        run: |
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "--- all installed NDKs ---"
           ls -1 "$ANDROID_HOME/ndk" 2>/dev/null
 
       - name: Install dependencies
